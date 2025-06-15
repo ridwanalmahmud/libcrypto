@@ -1,0 +1,5 @@
+-I../include/libcrypto
+-Iutils
+-Wall
+-Wextra
+-pedantic

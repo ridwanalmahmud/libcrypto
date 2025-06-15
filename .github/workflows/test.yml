@@ -1,0 +1,113 @@
+name: CI Build, Test, and Package
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            make \
+            build-essential \
+            tree
+      - name: Build
+        run: |
+          make clean
+          mkdir -p build
+          make -j$(nproc)
+          echo "Build artifacts:"
+          ls -l build/
+      - name: Run tests
+        run: |
+          cd tests && make clean && make && make test
+  package:
+    needs: build-and-test
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required for creating releases
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Determine version
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "Packaging version: ${VERSION}"
+      - name: Package artifacts
+        run: |
+          # Create directory structure
+          mkdir -p dist/{lib,include,pkgconfig}
+
+          # Handle shared library
+          if [ -f "build/libcrypto.so" ]; then
+            echo "Found shared library"
+            cp build/libcrypto.so dist/lib/
+            cp build/libcrypto.so dist/lib/libcrypto.so.$VERSION
+            cd dist/lib
+            ln -sf libcrypto.so.$VERSION libcrypto.so
+            cd -
+          else
+            echo "Error: Shared library not found"
+            ls -l build/
+            exit 1
+          fi
+
+          # Handle static library
+          if [ -f "build/libcrypto.a" ]; then
+            echo "Copying static library"
+            cp build/libcrypto.a dist/lib/
+          else
+            echo "Error: Static library not found"
+            exit 1
+          fi
+
+          # Handle headers (create empty if missing)
+          mkdir -p include
+          if [ "$(ls -A include)" ]; then
+            echo "Copying headers"
+            cp -r include/* dist/include/
+          else
+            echo "Warning: No headers found - creating empty include directory"
+            touch dist/include/.keep
+          fi
+
+          # Create pkg-config file
+          cat > dist/pkgconfig/libcrypto.pc <<EOF
+          prefix=/usr/local
+          libdir=\${prefix}/lib
+          includedir=\${prefix}/include
+
+          Name: libcrypto
+          Description: Educational crypto library
+          Version: $VERSION
+          Libs: -L\${libdir} -lcrypto
+          Cflags: -I\${includedir}
+          EOF
+
+          # Verify package
+          echo "Final package contents:"
+          tree dist/
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libcrypto-${{ env.VERSION }}
+          path: dist/
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref }}
+          files: |
+            dist/lib/libcrypto.*
+            dist/pkgconfig/libcrypto.pc
+            dist/include/*
